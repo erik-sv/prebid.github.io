@@ -60,13 +60,13 @@ pbjs.setConfig({
 | `waitForIt` | Required for asynchronous lookup | Boolean | `false` | Set to `true` so RTD core waits up to `auctionDelay` for the result |
 | `params.timeout` | Optional | Number | `300` | Total provider deadline in milliseconds for URL hashing, signal lookup, JWKS retrieval, and verification. The effective budget is the smaller of this value and `auctionDelay` |
 | `params.telemetry` | Optional | Boolean | `false` | Emit privacy-minimized diagnostic delivery events after the auction callback |
-| `params.adoptionReporting` | Optional | Boolean | `true` | Permit domain-level adoption observations on the existing lookup. Set exactly `false` to opt out |
+| `params.adoptionReporting` | Optional | Boolean | `true` | Permit domain-level adoption observations on consent-allowed lookups. Set exactly `false` to opt out |
 
 The signal origin is fixed at `https://signals.encypher.com`. Publishers cannot configure a mirror, alternate subdomain, or path-prefix override.
 
 ## How it works
 
-For each auction, the provider:
+For each auction, the provider first checks consent. When transmission is allowed, it:
 
 1. Selects the page's canonical URL, removes its fragment, normalizes percent encoding, and sorts query parameters.
 2. Computes the SHA-256 URL digest with browser WebCrypto.
@@ -85,7 +85,7 @@ The provider adds one compact object at `imp.ext.c2pa`:
 {
   "v": 1,
   "id": "epa_01J...",
-  "ref": "https://api.encypher.com/api/v1/public/provenance/attestations/epa_01J...",
+  "ref": "https://api.encypher.com/api/v1/proof/bNv0YOZMqiDPmlW0hf0im_AkYKJ53GZxuJIsodyhMRg",
   "att": "eyJhbGciOiJFUzI1NiIs..."
 }
 ```
@@ -96,8 +96,8 @@ The provider adds one compact object at `imp.ext.c2pa`:
 | - | - | - |
 | `v` | Integer | Protocol version, exactly `1` |
 | `id` | String | Stable provenance record identifier |
-| `ref` | HTTPS URL | Deterministic public attestation resource bound to the signed record subject |
-| `att` | Compact JWS | ES256 attestation binding the record to the canonical URL digest, publisher domain, policy version, revision, and expiration |
+| `ref` | HTTPS URL | Content-addressed public evidence URL derived from the signed manifest SHA-256 digest |
+| `att` | Compact JWS | ES256 attestation binding the record to the canonical URL digest, publisher domain, manifest digest, policy version, revision, and expiration |
 
 The serialized extension is limited to 1 KiB. Existing impression fields, including GPID, remain unchanged. Supply-chain data remains separate.
 
@@ -108,11 +108,11 @@ The provider requires:
 - A fixed `https://signals.encypher.com` decision with status `ready`, `miss`, `revoked`, or `stale`.
 - `record` to be the exact compact carrier for `ready` and `null` for every other status.
 - An ES256 signature from the selected P-256 key in the pinned JWKS.
-- Exact issuer, subject, publisher domain, canonical URL digest, validation result, declaration, policy version, signed revision, and lifetime claims.
-- Exact equality between `ref` and the pinned public attestation URL derived from the signed subject.
+- Exact issuer, subject, publisher domain, canonical URL digest, manifest digest, validation result, declaration, policy version, signed revision, and lifetime claims.
+- Exact equality between `ref` and `https://api.encypher.com/api/v1/proof/` followed by the signed `manifest_digest`, encoded as canonical unpadded base64url for 32 bytes. The browser does not fetch the evidence.
 - At most 4 KiB of decoded decision JSON and 64 KiB of decoded JWKS JSON.
 
-Signal and JWKS requests omit credentials and referrers, reject redirects, and bypass HTTP caches. A ready decision may be reused in page memory for at most 30 seconds, but its JWS and signed expiration are checked before every injection. JWKS entries expire after 60 seconds.
+Signal and JWKS requests omit credentials and referrers, reject redirects, and bypass HTTP caches. A ready decision may be reused in page memory for at most 30 seconds, but its JWS and signed expiration are checked before every injection. JWKS entries expire after 30 seconds.
 
 Page-lifetime dataset, status, and signed-revision watermarks prevent older or delayed responses from replacing newer decisions. `miss`, `revoked`, and `stale` decisions block equal or older ready responses. The provider also isolates carrier writes to the current auction, so a successful result cannot persist on reusable publisher ad-unit objects.
 
@@ -122,11 +122,17 @@ The record JWS authenticates the carrier and its signed claims. The pinned `http
 
 Current status is not separately signed for the browser. Compromise of the signal authority, its Cloudflare account or route, or its TLS control plane can replay a still-unexpired issuer-signed record. Compromise of the pinned JWKS origin can substitute verification keys. These authority compromises are outside the browser protocol's protection.
 
+The evidence URL is cryptographically bound to the signed manifest digest. Substituting another syntactically valid evidence URL without changing the signed attestation causes rejection. Evidence retrieval still depends on the proof endpoint's availability and access controls; the browser does not treat a valid signature as proof of current availability.
+
 ## Privacy and diagnostics
 
-Lookup requests disclose the canonical URL digest, canonical publisher hostname, and module version to the fixed signal authority. They do not disclose the raw URL, page content, manifest, user or cookie identifier, bid, price, deal, or creative. Requests omit browser credentials and referrers.
+The provider skips all work when COPPA applies, the US Privacy string records a sale opt-out, or GDPR applicability is true or unresolved. Encypher has no registered GVL ID, so a consent string or another vendor's consent cannot authorize transmission to Encypher. When GDPR consent management is enabled but supplies no data, the provider also skips the lookup. Builds without consent modules can perform the lookup.
 
-When `params.telemetry` is `true`, the module sends one post-callback diagnostic event through Prebid's fetch wrapper. It contains only protocol and module versions, outcome, impression count, duration, and optional dataset version. Non-injected outcomes report an impression count of zero. Telemetry failure cannot affect the auction.
+Blocked calls complete the RTD callback without URL hashing, signal or JWKS requests, cached-signal injection, diagnostics, or adoption reporting. Ordinary auctions continue. Consent is checked again for every auction, including auctions that could otherwise reuse a cached signal.
+
+Allowed lookup requests disclose the canonical URL digest, canonical publisher hostname, and module version to the fixed signal authority. They do not upload the raw URL, page content, manifest, cookies, bids, prices, deals, or creatives. Requests omit browser credentials and referrers. The URL digest is not an anonymization guarantee; canonical URLs can contain visitor-specific query values.
+
+When consent permits transmission and `params.telemetry` is `true`, the module sends one post-callback diagnostic event through Prebid's fetch wrapper. It contains only protocol and module versions, outcome, impression count, duration, and optional dataset version. Non-injected outcomes report an impression count of zero. Telemetry failure cannot affect the auction.
 
 When adoption reporting is enabled, the edge records an observation only when the browser Origin hostname exactly matches the requested publisher hostname. Retained fields are limited to the publisher FQDN, first and last seen times, module version, aggregate lookup/hit/miss counts, and dataset version. `params.adoptionReporting: false` adds the opt-out to the existing lookup and creates no second request.
 
